@@ -1,0 +1,15 @@
+# Data Wrangling and Mathematics
+pandas
+numpy
+
+# Machine Learning Models and Helpers
+scikit-learn
+xgboost
+lightgbm
+
+# Data Visualization and Charts
+matplotlib
+seaborn
+
+# Web App Dashboard Interface
+streamlit
