@@ -441,3 +441,22 @@ print(
 )
 
 print("\nInspection completed successfully.")
+
+
+
+gap_check = (
+    df.groupby(["store_id", "product_id"])["dt"]
+      .diff()
+      .dt.days
+)
+
+print(gap_check.value_counts().sort_index().head(20))
+
+
+
+print(
+    df.groupby(["store_id", "product_id"])
+      ["dt"]
+      .nunique()
+      .describe()
+)
