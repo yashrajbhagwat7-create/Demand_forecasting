@@ -1,330 +1,1098 @@
 """
-Baseline Model Pipeline: Feature Engineering + Feature Selection + Training
+Baseline Model Pipeline
+Feature Engineering -> Train/Test Split -> Feature Selection -> Training -> Evaluation
 """
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 import warnings
-from sklearn.model_selection import train_test_split
+import time
+
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import time
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
+)
+from sklearn.feature_selection import (
+    SelectKBest,
+    f_regression,
+    mutual_info_regression,
+)
 
-warnings.filterwarnings('ignore')
+# Import YOUR feature engineering pipeline
+from feature_engineering import run_feature_engineering
+
+
+warnings.filterwarnings("ignore")
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 RESULTS_DIR = PROJECT_ROOT / "model_results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
+DATA_PATH = PROJECT_ROOT / "data" / "prepared_sales.csv"
+
+TARGET = "sale_amount"
+
+TEST_SIZE = 0.20
+
+RANDOM_STATE = 42
+
+N_ESTIMATORS = 100
+
+TOP_K_FEATURES = 20
+
+
+# ============================================================
+# Load Data
+# ============================================================
+
 def load_data():
     """Load prepared sales data."""
-    print("Loading data...")
-    t0 = time.time()
-    df = pd.read_csv(PROJECT_ROOT / "data" / "prepared_sales.csv")
-    print(f"Loaded {len(df)} rows in {time.time()-t0:.1f}s")
-    print(f"Columns: {df.columns.tolist()}")
-    return df
 
-def engineer_features(df):
-    """
-    Feature engineering: calendar, lag, rolling, category, interaction features.
-    """
-    print("\n--- Feature Engineering ---")
-    t0 = time.time()
-    df = df.copy()
-    df["dt"] = pd.to_datetime(df["dt"])
+    print("\n--- Loading Data ---")
 
-    # --- Calendar features ---
-    df["day_of_week"] = df["dt"].dt.dayofweek
-    df["day_of_month"] = df["dt"].dt.day
-    df["month"] = df["dt"].dt.month
-    df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
-    print(f"  Calendar features added ({time.time()-t0:.1f}s)")
+    start_time = time.time()
 
-    # --- Lag features ---
-    t1 = time.time()
-    df = df.sort_values(["store_id", "product_id", "dt"]).reset_index(drop=True)
-    for lag in [1, 7, 14, 28]:
-        df[f"lag_{lag}"] = df.groupby(["store_id", "product_id"])["sale_amount"].shift(lag)
-    print(f"  Lag features added ({time.time()-t1:.1f}s)")
+    df = pd.read_csv(DATA_PATH)
 
-    # --- Rolling mean features ---
-    t2 = time.time()
-    for win in [7, 14, 28]:
-        df[f"rolling_mean_{win}"] = (
-            df.groupby(["store_id", "product_id"])["sale_amount"]
-            .shift(1)
-            .transform(lambda x: x.rolling(win, min_periods=1).mean())
-        )
-        df[f"rolling_std_{win}"] = (
-            df.groupby(["store_id", "product_id"])["sale_amount"]
-            .shift(1)
-            .transform(lambda x: x.rolling(win, min_periods=1).std())
-        )
-    print(f"  Rolling features added ({time.time()-t2:.1f}s)")
-
-    # --- Category aggregation features ---
-    t3 = time.time()
-    for col in ["store_id", "product_id", "first_category_id", "second_category_id"]:
-        grp = df.groupby(col)["sale_amount"].agg(["mean", "std"]).reset_index()
-        grp.columns = [col, f"{col}_mean", f"{col}_std"]
-        df = df.merge(grp, on=col, how="left")
-    print(f"  Category features added ({time.time()-t3:.1f}s)")
-
-    # --- Interaction features ---
-    df["discount_x_holiday"] = df["discount"] * df["holiday_flag"]
-    df["temp_x_humidity"] = df["avg_temperature"] * df["avg_humidity"]
-    print("  Interaction features added")
-
-    print(f"Feature engineering completed in {time.time()-t0:.1f}s")
-    print(f"Final shape: {df.shape}")
-    return df
-
-def prepare_xy(df, target='sale_amount'):
-    """Select numeric features and target, drop NaN rows."""
-    df = df.dropna(subset=[target]).copy()
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    # Exclude target from features
-    feature_cols = [c for c in numeric_cols if c != target]
-    
-    # Check for NaN in features and report
-    nan_info = df[feature_cols].isnull().sum()
-    total_nan = nan_info.sum()
-    print(f"NaN values in features: {total_nan}")
-    if total_nan > 0:
-        print(f"NaN by column: {nan_info[nan_info > 0].to_dict()}")
-    
-    # Drop rows with any NaN in features
-    df_clean = df.dropna(subset=feature_cols)
-    print(f"Rows before NaN drop: {len(df)}, after: {len(df_clean)}")
-    
-    X = df_clean[feature_cols].values
-    y = df_clean[target].values
-    print(f"Prepared X shape: {X.shape}, y shape: {y.shape}")
-    return X, y, feature_cols
-
-def feature_selection(X, y, feature_names, k=20):
-    """Feature selection using univariate F-test and mutual info."""
-    from sklearn.feature_selection import SelectKBest, f_regression, mutual_info_regression
-    
-    print("\n--- Feature Selection ---")
-    
-    # Use all features for selection
-    sel_f = SelectKBest(score_func=f_regression, k=min(k, X.shape[1]))
-    sel_f.fit(X, y)
-    f_scores = sel_f.scores_
-    f_top = np.argsort(f_scores)[::-1][:k]
-    f_features = [feature_names[i] for i in f_top]
-    print(f"Top {k} by F-test: {f_features}")
-    
-    # Mutual info
-    sel_mi = SelectKBest(score_func=mutual_info_regression, k=min(k, X.shape[1]))
-    sel_mi.fit(X, y)
-    mi_scores = sel_mi.scores_
-    mi_top = np.argsort(mi_scores)[::-1][:k]
-    mi_features = [feature_names[i] for i in mi_top]
-    print(f"Top {k} by Mutual Info: {mi_features}")
-    
-    # Union of top features from both methods
-    all_selected = list(set(f_features + mi_features))
-    print(f"Combined unique features ({len(all_selected)}): {all_selected}")
-    
-    return all_selected, f_features, mi_features
-
-def train_models(X, y, X_selected=None, feature_names=None):
-    """Train baseline models."""
-    print("\n--- Model Training ---")
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, shuffle=False
+    print(
+        f"Loaded {len(df)} rows "
+        f"in {time.time() - start_time:.2f}s"
     )
-    print(f"Train: {X_train.shape}, Test: {X_test.shape}")
-    
-    scaler = StandardScaler()
-    
-    results = {}
-    
-    # 1. Linear Regression with all features
-    print("\n1. Linear Regression (all features)...")
-    t0 = time.time()
-    X_tr_s = scaler.fit_transform(X_train)
-    X_te_s = scaler.transform(X_test)
-    lr = LinearRegression()
-    lr.fit(X_tr_s, y_train)
-    y_pred_lr_tr = lr.predict(X_tr_s)
-    y_pred_lr_te = lr.predict(X_te_s)
-    lr_time = time.time() - t0
-    lr_rmse = np.sqrt(mean_squared_error(y_test, y_pred_lr_te))
-    lr_mae = mean_absolute_error(y_test, y_pred_lr_te)
-    lr_r2 = r2_score(y_test, y_pred_lr_te)
-    print(f"   Time: {lr_time:.1f}s, RMSE: {lr_rmse:.4f}, MAE: {lr_mae:.4f}, R²: {lr_r2:.4f}")
-    results['LinearRegression_All'] = {
-        'model': lr, 'scaler': scaler, 'rmse': lr_rmse, 'mae': lr_mae, 'r2': lr_r2,
-        'y_pred': y_pred_lr_te
-    }
-    
-    # 2. Linear Regression with selected features
-    if X_selected is not None and len(X_selected) > 0:
-        print("\n2. Linear Regression (selected features)...")
-        t0 = time.time()
-        idx = [feature_names.index(f) for f in X_selected if f in feature_names]
-        if idx:
-            X_sel = X[:, idx]
-            X_tr_sel, X_te_sel, y_tr_sel, y_te_sel = train_test_split(X_sel, y, test_size=0.2, random_state=42, shuffle=False)
-            scaler_sel = StandardScaler()
-            X_tr_sel_s = scaler_sel.fit_transform(X_tr_sel)
-            X_te_sel_s = scaler_sel.transform(X_te_sel)
-            lr_sel = LinearRegression()
-            lr_sel.fit(X_tr_sel_s, y_tr_sel)
-            y_pred_sel_te = lr_sel.predict(X_te_sel_s)
-            lr_sel_time = time.time() - t0
-            lr_sel_rmse = np.sqrt(mean_squared_error(y_te_sel, y_pred_sel_te))
-            lr_sel_mae = mean_absolute_error(y_te_sel, y_pred_sel_te)
-            lr_sel_r2 = r2_score(y_te_sel, y_pred_sel_te)
-            print(f"   Time: {lr_sel_time:.1f}s, RMSE: {lr_sel_rmse:.4f}, MAE: {lr_sel_mae:.4f}, R²: {lr_sel_r2:.4f}")
-            results['LinearRegression_Selected'] = {
-                'model': lr_sel, 'scaler': scaler_sel, 'rmse': lr_sel_rmse, 'mae': lr_sel_mae, 'r2': lr_sel_r2,
-                'y_pred': y_pred_sel_te, 'features': X_selected
-            }
-    
-    # 3. Random Forest
-    print("\n3. Random Forest...")
-    t0 = time.time()
-    rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-    rf.fit(X_train, y_train)
-    y_pred_rf_te = rf.predict(X_test)
-    rf_time = time.time() - t0
-    rf_rmse = np.sqrt(mean_squared_error(y_test, y_pred_rf_te))
-    rf_mae = mean_absolute_error(y_test, y_pred_rf_te)
-    rf_r2 = r2_score(y_test, y_pred_rf_te)
-    print(f"   Time: {rf_time:.1f}s, RMSE: {rf_rmse:.4f}, MAE: {rf_mae:.4f}, R²: {rf_r2:.4f}")
-    
-    # Feature importance
-    if feature_names:
-        imp = rf.feature_importances_
-        top_idx = np.argsort(imp)[::-1][:15]
-        top_feats = [(feature_names[i], imp[i]) for i in top_idx]
-        print("   Top 15 feature importances:")
-        for name, score in top_feats:
-            print(f"      {name:30s} {score:.4f}")
-    results['RandomForest'] = {
-        'model': rf, 'rmse': rf_rmse, 'mae': rf_mae, 'r2': rf_r2,
-        'y_pred': y_pred_rf_te, 'importances': rf.feature_importances_,
-        'feature_names': feature_names
-    }
-    
-    # 4. Random Forest with selected features
-    if X_selected is not None and len(X_selected) > 0:
-        print("\n4. Random Forest (selected features)...")
-        t0 = time.time()
-        idx = [feature_names.index(f) for f in X_selected if f in feature_names]
-        if idx:
-            X_sel = X[:, idx]
-            X_tr_sel, X_te_sel, y_tr_sel, y_te_sel = train_test_split(
-                X_sel, y, test_size=0.2, random_state=42, shuffle=False
+
+    print(f"Shape: {df.shape}")
+
+    return df
+
+
+# ============================================================
+# Prepare X and y
+# ============================================================
+
+def prepare_xy(
+    df: pd.DataFrame,
+    target: str = TARGET,
+):
+    """
+    Prepare feature matrix X and target y.
+
+    Only numeric columns are used for the baseline models.
+    """
+
+    print("\n--- Preparing X and y ---")
+
+    df = df.copy()
+
+    if target not in df.columns:
+        raise ValueError(
+            f"Target column '{target}' not found."
+        )
+
+    # Remove rows where target is missing
+    df = df.dropna(
+        subset=[target]
+    )
+
+    # Only numeric columns
+    numeric_columns = (
+        df.select_dtypes(
+            include=[np.number]
+        )
+        .columns
+        .tolist()
+    )
+
+    feature_columns = [
+        column
+        for column in numeric_columns
+        if column != target
+    ]
+
+    # Check missing values
+    missing = (
+        df[feature_columns]
+        .isna()
+        .sum()
+    )
+
+    missing = missing[
+        missing > 0
+    ]
+
+    if not missing.empty:
+
+        print("\nMissing values:")
+
+        for column, count in missing.items():
+            print(
+                f"  {column}: {count}"
             )
-            rf_sel = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-            rf_sel.fit(X_tr_sel, y_tr_sel)
-            y_pred_rf_sel = rf_sel.predict(X_te_sel)
-            rf_sel_time = time.time() - t0
-            rf_sel_rmse = np.sqrt(mean_squared_error(y_te_sel, y_pred_rf_sel))
-            rf_sel_mae = mean_absolute_error(y_te_sel, y_pred_rf_sel)
-            rf_sel_r2 = r2_score(y_te_sel, y_pred_rf_sel)
-            print(f"   Time: {rf_sel_time:.1f}s, RMSE: {rf_sel_rmse:.4f}, MAE: {rf_sel_mae:.4f}, R²: {rf_sel_r2:.4f}")
-            results['RandomForest_Selected'] = {
-                'model': rf_sel, 'rmse': rf_sel_rmse, 'mae': rf_sel_mae, 'r2': rf_sel_r2,
-                'y_pred': y_pred_rf_sel
-            }
-    
-    return results, y_test, scaler
 
-def plot_results(results, y_test, feature_names=None):
-    """Save prediction plots and feature importance."""
-    if not results:
-        print("No results to plot.")
-        return
-    
-    plt.figure(figsize=(15, 5))
-    for i, (name, res) in enumerate(results.items()):
-        plt.subplot(1, len(results), i+1)
-        plt.scatter(y_test, res['y_pred'], alpha=0.4, s=10)
-        lims = [min(y_test.min(), res['y_pred'].min()), max(y_test.max(), res['y_pred'].max())]
-        plt.plot(lims, lims, 'r--', lw=2)
-        plt.xlabel('Actual')
-        plt.ylabel('Predicted')
-        plt.title(f'{name}\nR²={res["r2"]:.3f}')
-        plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(RESULTS_DIR / 'predictions.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Saved predictions plot to {RESULTS_DIR / 'predictions.png'}")
-    
+        # For this baseline, remove rows
+        # with incomplete feature history.
+        df = df.dropna(
+            subset=feature_columns
+        )
+
+    X = df[feature_columns].copy()
+
+    y = df[target].copy()
+
+    print(
+        f"\nX shape: {X.shape}"
+    )
+
+    print(
+        f"y shape: {y.shape}"
+    )
+
+    print(
+        f"Number of features: "
+        f"{len(feature_columns)}"
+    )
+
+    return X, y, feature_columns
+
+
+# ============================================================
+# Chronological Train/Test Split
+# ============================================================
+
+def chronological_split(
+    X,
+    y,
+    test_size=TEST_SIZE,
+):
+    """
+    Split data chronologically.
+
+    Earlier observations -> training
+    Later observations   -> testing
+    """
+
+    split_index = int(
+        len(X) * (1 - test_size)
+    )
+
+    X_train = X.iloc[:split_index].copy()
+    X_test = X.iloc[split_index:].copy()
+
+    y_train = y.iloc[:split_index].copy()
+    y_test = y.iloc[split_index:].copy()
+
+    print("\n--- Chronological Split ---")
+
+    print(
+        f"Train: {X_train.shape}"
+    )
+
+    print(
+        f"Test:  {X_test.shape}"
+    )
+
+    return (
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+    )
+
+
+# ============================================================
+# Feature Selection
+# ============================================================
+
+def feature_selection(
+    X_train,
+    y_train,
+    feature_names,
+    k=TOP_K_FEATURES,
+):
+    """
+    Perform feature selection using training data only.
+
+    Two methods are used:
+    1. F-test
+    2. Mutual Information
+
+    Their top features are combined.
+    """
+
+    print("\n--- Feature Selection ---")
+
+    k = min(
+        k,
+        X_train.shape[1]
+    )
+
+    # --------------------------------------------------------
+    # F-test
+    # --------------------------------------------------------
+
+    selector_f = SelectKBest(
+        score_func=f_regression,
+        k=k,
+    )
+
+    selector_f.fit(
+        X_train,
+        y_train,
+    )
+
+    f_scores = selector_f.scores_
+
+    f_indices = np.argsort(
+        f_scores
+    )[::-1][:k]
+
+    f_features = [
+        feature_names[i]
+        for i in f_indices
+    ]
+
+    print(
+        f"\nTop {k} F-test features:"
+    )
+
+    for feature in f_features:
+        print(
+            f"  {feature}"
+        )
+
+    # --------------------------------------------------------
+    # Mutual Information
+    # --------------------------------------------------------
+
+    selector_mi = SelectKBest(
+        score_func=mutual_info_regression,
+        k=k,
+    )
+
+    selector_mi.fit(
+        X_train,
+        y_train,
+    )
+
+    mi_scores = selector_mi.scores_
+
+    mi_indices = np.argsort(
+        mi_scores
+    )[::-1][:k]
+
+    mi_features = [
+        feature_names[i]
+        for i in mi_indices
+    ]
+
+    print(
+        f"\nTop {k} Mutual Information features:"
+    )
+
+    for feature in mi_features:
+        print(
+            f"  {feature}"
+        )
+
+    # --------------------------------------------------------
+    # Combine
+    # --------------------------------------------------------
+
+    selected_features = list(
+        dict.fromkeys(
+            f_features + mi_features
+        )
+    )
+
+    print(
+        f"\nCombined features: "
+        f"{len(selected_features)}"
+    )
+
+    for feature in selected_features:
+        print(
+            f"  {feature}"
+        )
+
+    return (
+        selected_features,
+        f_features,
+        mi_features,
+    )
+
+
+# ============================================================
+# Evaluation
+# ============================================================
+
+def evaluate_model(
+    model_name,
+    y_true,
+    y_pred,
+):
+    """Calculate regression metrics."""
+
+    rmse = np.sqrt(
+        mean_squared_error(
+            y_true,
+            y_pred,
+        )
+    )
+
+    mae = mean_absolute_error(
+        y_true,
+        y_pred,
+    )
+
+    r2 = r2_score(
+        y_true,
+        y_pred,
+    )
+
+    print(
+        f"   RMSE: {rmse:.4f}"
+    )
+
+    print(
+        f"   MAE:  {mae:.4f}"
+    )
+
+    print(
+        f"   R²:   {r2:.4f}"
+    )
+
+    return {
+        "model_name": model_name,
+        "rmse": rmse,
+        "mae": mae,
+        "r2": r2,
+        "y_pred": y_pred,
+    }
+
+
+# ============================================================
+# Train Linear Regression
+# ============================================================
+
+def train_linear_regression(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+):
+    """Train Linear Regression using all features."""
+
+    print(
+        "\n1. Linear Regression (all features)..."
+    )
+
+    start_time = time.time()
+
+    scaler = StandardScaler()
+
+    X_train_scaled = (
+        scaler.fit_transform(X_train)
+    )
+
+    X_test_scaled = (
+        scaler.transform(X_test)
+    )
+
+    model = LinearRegression()
+
+    model.fit(
+        X_train_scaled,
+        y_train,
+    )
+
+    predictions = model.predict(
+        X_test_scaled
+    )
+
+    result = evaluate_model(
+        "LinearRegression_All",
+        y_test,
+        predictions,
+    )
+
+    result["model"] = model
+
+    result["scaler"] = scaler
+
+    result["features"] = list(
+        X_train.columns
+    )
+
+    result["training_time"] = (
+        time.time() - start_time
+    )
+
+    return result
+
+
+# ============================================================
+# Train Linear Regression - Selected
+# ============================================================
+
+def train_linear_regression_selected(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    selected_features,
+):
+    """Train Linear Regression using selected features."""
+
+    print(
+        "\n2. Linear Regression (selected features)..."
+    )
+
+    start_time = time.time()
+
+    X_train_selected = (
+        X_train[selected_features]
+    )
+
+    X_test_selected = (
+        X_test[selected_features]
+    )
+
+    scaler = StandardScaler()
+
+    X_train_scaled = (
+        scaler.fit_transform(
+            X_train_selected
+        )
+    )
+
+    X_test_scaled = (
+        scaler.transform(
+            X_test_selected
+        )
+    )
+
+    model = LinearRegression()
+
+    model.fit(
+        X_train_scaled,
+        y_train,
+    )
+
+    predictions = model.predict(
+        X_test_scaled
+    )
+
+    result = evaluate_model(
+        "LinearRegression_Selected",
+        y_test,
+        predictions,
+    )
+
+    result["model"] = model
+
+    result["scaler"] = scaler
+
+    result["features"] = selected_features
+
+    result["training_time"] = (
+        time.time() - start_time
+    )
+
+    return result
+
+
+# ============================================================
+# Train Random Forest
+# ============================================================
+
+def train_random_forest(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    feature_names,
+):
+    """Train Random Forest using all features."""
+
+    print(
+        "\n3. Random Forest (all features)..."
+    )
+
+    start_time = time.time()
+
+    model = RandomForestRegressor(
+        n_estimators=N_ESTIMATORS,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+    )
+
+    model.fit(
+        X_train,
+        y_train,
+    )
+
+    predictions = model.predict(
+        X_test
+    )
+
+    result = evaluate_model(
+        "RandomForest",
+        y_test,
+        predictions,
+    )
+
+    result["model"] = model
+
+    result["features"] = feature_names
+
+    result["importances"] = (
+        model.feature_importances_
+    )
+
+    result["training_time"] = (
+        time.time() - start_time
+    )
+
+    # --------------------------------------------------------
     # Feature importance
-    if 'RandomForest' in results and results['RandomForest'].get('importances') is not None:
-        imp = results['RandomForest']['importances']
-        names = results['RandomForest'].get('feature_names', [])
-        if len(imp) == len(names) and len(names) > 0:
-            top_idx = np.argsort(imp)[::-1][:20]
-            
-            plt.figure(figsize=(10, 6))
-            plt.title('Top 20 Feature Importances (Random Forest)')
-            plt.barh(range(len(top_idx)), imp[top_idx][::-1], align='center')
-            plt.yticks(range(len(top_idx)), [names[i] for i in top_idx][::-1])
-            plt.xlabel('Importance')
-            plt.tight_layout()
-            plt.savefig(RESULTS_DIR / 'feature_importance.png', dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"Saved feature importance plot to {RESULTS_DIR / 'feature_importance.png'}")
+    # --------------------------------------------------------
 
-def save_results(results, selected_features=None):
-    """Write results summary to file."""
-    path = RESULTS_DIR / 'results_summary.txt'
-    with open(path, 'w') as f:
-        f.write("DEMAND FORECASTING - BASELINE MODEL RESULTS\n")
-        f.write("=" * 50 + "\n\n")
-        for name, res in results.items():
-            f.write(f"{name}:\n")
-            f.write(f"  RMSE: {res['rmse']:.4f}\n")
-            f.write(f"  MAE:  {res['mae']:.4f}\n")
-            f.write(f"  R²:   {res['r2']:.4f}\n")
-            f.write("\n")
-        if selected_features:
-            f.write("Selected features:\n")
-            for feat in selected_features:
-                f.write(f"  {feat}\n")
-    print(f"Results saved to {path}")
+    importance = (
+        model.feature_importances_
+    )
+
+    indices = np.argsort(
+        importance
+    )[::-1][:15]
+
+    print(
+        "\n   Top 15 feature importances:"
+    )
+
+    for index in indices:
+
+        print(
+            f"      "
+            f"{feature_names[index]:30s} "
+            f"{importance[index]:.4f}"
+        )
+
+    return result
+
+
+# ============================================================
+# Train Random Forest - Selected
+# ============================================================
+
+def train_random_forest_selected(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    selected_features,
+):
+    """Train Random Forest using selected features."""
+
+    print(
+        "\n4. Random Forest (selected features)..."
+    )
+
+    start_time = time.time()
+
+    X_train_selected = (
+        X_train[selected_features]
+    )
+
+    X_test_selected = (
+        X_test[selected_features]
+    )
+
+    model = RandomForestRegressor(
+        n_estimators=N_ESTIMATORS,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+    )
+
+    model.fit(
+        X_train_selected,
+        y_train,
+    )
+
+    predictions = model.predict(
+        X_test_selected
+    )
+
+    result = evaluate_model(
+        "RandomForest_Selected",
+        y_test,
+        predictions,
+    )
+
+    result["model"] = model
+
+    result["features"] = selected_features
+
+    result["importances"] = (
+        model.feature_importances_
+    )
+
+    result["training_time"] = (
+        time.time() - start_time
+    )
+
+    return result
+
+
+# ============================================================
+# Plot Results
+# ============================================================
+
+def plot_results(
+    results,
+    y_test,
+):
+    """Save model prediction plots."""
+
+    if not results:
+        return
+
+    number_of_models = len(results)
+
+    fig, axes = plt.subplots(
+        1,
+        number_of_models,
+        figsize=(
+            6 * number_of_models,
+            5,
+        ),
+    )
+
+    if number_of_models == 1:
+        axes = [axes]
+
+    for ax, (name, result) in zip(
+        axes,
+        results.items(),
+    ):
+
+        predictions = result["y_pred"]
+
+        ax.scatter(
+            y_test,
+            predictions,
+            alpha=0.4,
+            s=10,
+        )
+
+        minimum = min(
+            y_test.min(),
+            predictions.min(),
+        )
+
+        maximum = max(
+            y_test.max(),
+            predictions.max(),
+        )
+
+        ax.plot(
+            [minimum, maximum],
+            [minimum, maximum],
+            "r--",
+            linewidth=2,
+        )
+
+        ax.set_xlabel(
+            "Actual"
+        )
+
+        ax.set_ylabel(
+            "Predicted"
+        )
+
+        ax.set_title(
+            f"{name}\n"
+            f"R² = {result['r2']:.3f}"
+        )
+
+        ax.grid(
+            True,
+            alpha=0.3,
+        )
+
+    plt.tight_layout()
+
+    path = (
+        RESULTS_DIR /
+        "predictions.png"
+    )
+
+    plt.savefig(
+        path,
+        dpi=150,
+        bbox_inches="tight",
+    )
+
+    plt.close()
+
+    print(
+        f"\nSaved prediction plot: {path}"
+    )
+
+
+# ============================================================
+# Feature Importance Plot
+# ============================================================
+
+def plot_feature_importance(
+    results,
+):
+    """Save Random Forest feature importance plot."""
+
+    if "RandomForest" not in results:
+        return
+
+    result = results[
+        "RandomForest"
+    ]
+
+    importance = result.get(
+        "importances"
+    )
+
+    names = result.get(
+        "features"
+    )
+
+    if importance is None:
+        return
+
+    if names is None:
+        return
+
+    top_n = min(
+        20,
+        len(names),
+    )
+
+    indices = np.argsort(
+        importance
+    )[::-1][:top_n]
+
+    plt.figure(
+        figsize=(10, 7)
+    )
+
+    plt.barh(
+        range(top_n),
+        importance[indices][::-1],
+    )
+
+    plt.yticks(
+        range(top_n),
+        [
+            names[i]
+            for i in indices
+        ][::-1],
+    )
+
+    plt.xlabel(
+        "Importance"
+    )
+
+    plt.title(
+        "Top Random Forest Feature Importances"
+    )
+
+    plt.tight_layout()
+
+    path = (
+        RESULTS_DIR /
+        "feature_importance.png"
+    )
+
+    plt.savefig(
+        path,
+        dpi=150,
+        bbox_inches="tight",
+    )
+
+    plt.close()
+
+    print(
+        f"Saved feature importance plot: {path}"
+    )
+
+
+# ============================================================
+# Save Results
+# ============================================================
+
+def save_results(
+    results,
+    selected_features,
+):
+    """Save model results to a text file."""
+
+    path = (
+        RESULTS_DIR /
+        "results_summary.txt"
+    )
+
+    with open(
+        path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        file.write(
+            "DEMAND FORECASTING - "
+            "BASELINE MODEL RESULTS\n"
+        )
+
+        file.write(
+            "=" * 60 + "\n\n"
+        )
+
+        for name, result in results.items():
+
+            file.write(
+                f"{name}:\n"
+            )
+
+            file.write(
+                f"  RMSE: "
+                f"{result['rmse']:.4f}\n"
+            )
+
+            file.write(
+                f"  MAE:  "
+                f"{result['mae']:.4f}\n"
+            )
+
+            file.write(
+                f"  R²:   "
+                f"{result['r2']:.4f}\n"
+            )
+
+            if "training_time" in result:
+
+                file.write(
+                    f"  Time: "
+                    f"{result['training_time']:.2f}s\n"
+                )
+
+            file.write("\n")
+
+        file.write(
+            "SELECTED FEATURES\n"
+        )
+
+        file.write(
+            "-" * 40 + "\n"
+        )
+
+        for feature in selected_features:
+
+            file.write(
+                f"{feature}\n"
+            )
+
+    print(
+        f"Results saved to: {path}"
+    )
+
+
+# ============================================================
+# Main Pipeline
+# ============================================================
 
 def main():
+
     print("=" * 60)
-    print("DEMAND FORECASTING - BASELINE MODEL PIPELINE")
+
+    print(
+        "DEMAND FORECASTING - "
+        "BASELINE MODEL PIPELINE"
+    )
+
     print("=" * 60)
-    t_start = time.time()
-    
+
+    start_time = time.time()
+
+    # --------------------------------------------------------
     # 1. Load
+    # --------------------------------------------------------
+
     df = load_data()
-    
+
+    # --------------------------------------------------------
     # 2. Feature Engineering
-    df_fe = engineer_features(df)
-    
-    # 3. Prepare X, y
-    X, y, feature_names = prepare_xy(df_fe, target='sale_amount')
-    
-    # 4. Feature Selection
-    all_selected, f_top, mi_top = feature_selection(X, y, feature_names, k=20)
-    
-    # 5. Train
-    results, y_test, scaler = train_models(X, y, all_selected, feature_names)
-    
-    # 6. Plot & save
-    plot_results(results, y_test, feature_names)
-    save_results(results, all_selected)
-    
-    print(f"\nTotal pipeline time: {time.time()-t_start:.1f}s")
+    # --------------------------------------------------------
+
+    print(
+        "\n--- Running Feature Engineering Module ---"
+    )
+
+    df_fe = run_feature_engineering(
+        df,
+
+        with_lag=True,
+
+        with_rolling=True,
+
+        # Disabled by default because naive
+        # target aggregation causes leakage.
+        with_category=False,
+
+        with_interaction=True,
+
+        remove_invalid_rows=False,
+    )
+
+    # --------------------------------------------------------
+    # 3. Prepare X and y
+    # --------------------------------------------------------
+
+    X, y, feature_names = prepare_xy(
+        df_fe,
+        target=TARGET,
+    )
+
+    # --------------------------------------------------------
+    # 4. Chronological Split
+    # --------------------------------------------------------
+
+    (
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+    ) = chronological_split(
+        X,
+        y,
+    )
+
+    # --------------------------------------------------------
+    # 5. Feature Selection
+    # --------------------------------------------------------
+
+    (
+        selected_features,
+        f_top,
+        mi_top,
+    ) = feature_selection(
+        X_train,
+        y_train,
+        feature_names,
+        k=TOP_K_FEATURES,
+    )
+
+    # --------------------------------------------------------
+    # 6. Train Models
+    # --------------------------------------------------------
+
+    results = {}
+
+    # Linear Regression - all
+    results[
+        "LinearRegression_All"
+    ] = train_linear_regression(
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+    )
+
+    # Linear Regression - selected
+    results[
+        "LinearRegression_Selected"
+    ] = train_linear_regression_selected(
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        selected_features,
+    )
+
+    # Random Forest - all
+    results[
+        "RandomForest"
+    ] = train_random_forest(
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        feature_names,
+    )
+
+    # Random Forest - selected
+    results[
+        "RandomForest_Selected"
+    ] = train_random_forest_selected(
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        selected_features,
+    )
+
+    # --------------------------------------------------------
+    # 7. Save plots
+    # --------------------------------------------------------
+
+    plot_results(
+        results,
+        y_test,
+    )
+
+    plot_feature_importance(
+        results,
+    )
+
+    # --------------------------------------------------------
+    # 8. Save results
+    # --------------------------------------------------------
+
+    save_results(
+        results,
+        selected_features,
+    )
+
+    # --------------------------------------------------------
+    # 9. Finish
+    # --------------------------------------------------------
+
+    total_time = (
+        time.time() - start_time
+    )
+
+    print("\n" + "=" * 60)
+
+    print(
+        f"Total pipeline time: "
+        f"{total_time:.2f}s"
+    )
+
+    print(
+        "PIPELINE COMPLETED"
+    )
+
     print("=" * 60)
-    print("PIPELINE COMPLETED")
-    print("=" * 60)
+
+
+# ============================================================
+# Entry Point
+# ============================================================
 
 if __name__ == "__main__":
     main()
