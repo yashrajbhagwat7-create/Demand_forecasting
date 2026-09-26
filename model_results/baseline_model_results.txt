@@ -1,0 +1,19 @@
+BASELINE MODEL RESULTS
+==================================================
+
+Linear Regression:
+  Train RMSE: 0.5924
+  Test RMSE:  0.5911
+  Train MAE:  0.3623
+  Test MAE:   0.3666
+  Train R²:   0.7714
+  Test R²:    0.8297
+
+Random Forest:
+  Train RMSE: 0.1880
+  Test RMSE:  0.5583
+  Train MAE:  0.1123
+  Test MAE:   0.3243
+  Train R²:   0.9770
+  Test R²:    0.8481
+

@@ -1,0 +1,45 @@
+DEMAND FORECASTING - BASELINE MODEL RESULTS
+==================================================
+
+LinearRegression_All:
+  RMSE: 0.5924
+  MAE:  0.3666
+  R²:   0.8289
+
+LinearRegression_Selected:
+  RMSE: 0.5925
+  MAE:  0.3524
+  R²:   0.8288
+
+RandomForest:
+  RMSE: 0.5588
+  MAE:  0.3242
+  R²:   0.8478
+
+RandomForest_Selected:
+  RMSE: 0.6124
+  MAE:  0.3526
+  R²:   0.8172
+
+Selected features:
+  lag_28
+  lag_14
+  rolling_mean_14
+  first_category_id_mean
+  first_category_id_std
+  management_group_id
+  product_id_mean
+  rolling_std_7
+  discount
+  product_id
+  second_category_id_std
+  lag_1
+  product_id_std
+  lag_7
+  rolling_std_14
+  third_category_id
+  rolling_mean_28
+  second_category_id_mean
+  rolling_mean_7
+  second_category_id
+  rolling_std_28
